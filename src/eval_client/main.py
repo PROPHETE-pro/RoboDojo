@@ -147,8 +147,7 @@ def _resume_manifest_path(eval_cfg, run_id):
     the writer and reader paths.
     """
     return os.path.join(
-        "eval_result",
-        BENCHMARK,
+        eval_result_root(),
         eval_cfg["task_name"],
         eval_cfg["policy_name"],
         eval_cfg["config_name"],

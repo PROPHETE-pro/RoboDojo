@@ -59,6 +59,17 @@ class SeedManager:
         self.idx = 0
         self._current_batch_seeds = None
 
+    def init_procedural(self):
+        """Train/RL mode: layouts are sampled from task YAML; do not read Eval_Layout."""
+        self.eval_seed = self.config.get("seed", 0)
+        self.seed_info = {}
+        self.seed_list = []
+        self.st_idx = 0
+        self.ed_idx = 0
+        self.type = "procedural"
+        self.idx = 0
+        self._current_batch_seeds = None
+
     def get_seeds(self, max_count: int | None = None) -> List[int] | None:
         """Return a list of seeds for the next `reset()` call.
 

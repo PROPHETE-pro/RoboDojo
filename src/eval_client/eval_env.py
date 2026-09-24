@@ -15,7 +15,7 @@ from env.global_configs import BENCHMARK
 from env.observation_manager.obs_manager import ObsManager
 from env.seed_manager.seed_manager import SeedManager
 from utils.cluttered_generator import UnStableError
-from utils.pipeline_utils import get_robot_action_dim_info
+from utils.pipeline_utils import eval_result_root, get_robot_action_dim_info
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
 
 
@@ -78,8 +78,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 os.environ["ROBODOJO_RUN_ID"] = run_id
             self.run_id = run_id
             self.save_dir = os.path.join(
-                "eval_result",
-                f"{BENCHMARK}",
+                eval_result_root(),
                 self.task_name,
                 self.policy_name,
                 self.config_name,
@@ -134,6 +133,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 "details": {},
             }
 
+            self.layout_mode = str(self.eval_cfg.get("layout_mode", "eval_json"))
             self.scene_manager.layout_manager.replay = True
             self.seed_manager = SeedManager(config.eval_cfg)
 
@@ -169,10 +169,13 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     f"completed={len(completed_layout_ids)} "
                     f"abandoned={len(abandoned_layout_ids)}"
                 )
-            self.seed_manager.init_eval(
-                completed_layout_ids=completed_layout_ids,
-                abandoned_layout_ids=abandoned_layout_ids,
-            )
+            if self.layout_mode == "procedural":
+                self.seed_manager.init_procedural()
+            else:
+                self.seed_manager.init_eval(
+                    completed_layout_ids=completed_layout_ids,
+                    abandoned_layout_ids=abandoned_layout_ids,
+                )
 
             self.deploy_cfg = config.deploy_cfg
             self.port = self.deploy_cfg.get("port", None)
@@ -226,9 +229,14 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
             self.current_env_seed_map = {}
             for idx in range(self.num_envs):
-                self.scene_manager.layout_manager.set_saved_layout(
-                    idx, self.seed_manager.get_seed_scene_info(self.env_seeds[idx])
-                )
+                if self.layout_mode == "procedural":
+                    self.scene_manager.layout_manager.generate_layout(
+                        idx, int(self.env_seeds[idx])
+                    )
+                else:
+                    self.scene_manager.layout_manager.set_saved_layout(
+                        idx, self.seed_manager.get_seed_scene_info(self.env_seeds[idx])
+                    )
                 if seed[idx] is None:
                     self.success[idx] = False
                     self.end_flag[idx] = True
@@ -659,8 +667,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             locate by humans.
             """
             return os.path.join(
-                "eval_result",
-                f"{BENCHMARK}",
+                eval_result_root(),
                 self.task_name,
                 self.policy_name,
                 self.config_name,

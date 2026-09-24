@@ -1,4 +1,5 @@
 from copy import deepcopy
+import os
 
 from curobo.batch_motion_planner import BatchMotionPlanner, MotionPlannerCfg
 from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
@@ -16,10 +17,49 @@ import torch
 import transforms3d as t3d
 import yaml
 
-from env.global_configs import BATCH_NUM
+from env.global_configs import BATCH_NUM, ROOT_DIR
 from utils.transformer import calculate_target_pose
 
 _curobo_runtime.cuda_graph_reset = True
+
+# Docker/CI leftovers still present in intern-mounted curobo.yml files.
+_DOCKER_ROBODOJO_PREFIXES = (
+    "/root/workspace/RoboDojo",
+    "/home/kaslensu/workspace/isaacsim_project/curobo",
+)
+
+
+def _resolve_curobo_asset_path(raw_path, yml_path, kind):
+    """Rewrite missing Docker absolute paths onto the local RoboDojo tree."""
+    if not raw_path:
+        return raw_path
+    root = os.path.abspath(ROOT_DIR)
+    assets_root = os.environ.get("ASSETS_PATH", root)
+    expanded = str(raw_path).replace("${ASSETS_PATH}", assets_root)
+    expanded = os.path.expandvars(expanded)
+    tried = [expanded]
+    if os.path.exists(expanded):
+        return expanded
+    for prefix in _DOCKER_ROBODOJO_PREFIXES:
+        if expanded.startswith(prefix):
+            rewritten = os.path.join(root, expanded[len(prefix) :].lstrip("/"))
+            tried.append(rewritten)
+            if os.path.exists(rewritten):
+                return rewritten
+            break
+    yml_dir = os.path.dirname(os.path.abspath(yml_path))
+    if kind == "urdf":
+        fallback = os.path.join(yml_dir, os.path.basename(expanded.rstrip("/")))
+    else:
+        fallback = yml_dir
+    if fallback not in tried:
+        tried.append(fallback)
+    if os.path.exists(fallback):
+        return fallback
+    raise ValueError(
+        f"Curobo {kind} path does not exist. original={raw_path!r} "
+        f"expanded={expanded!r} tried={tried}"
+    )
 
 
 class CuroboPlanner:
@@ -478,6 +518,14 @@ class CuroboPlanner:
             "grasp_contact_link_names",
         }
         kinematics = {k: v for k, v in kinematics.items() if k in kinematics_allowed}
+        if kinematics.get("urdf_path"):
+            kinematics["urdf_path"] = _resolve_curobo_asset_path(
+                kinematics["urdf_path"], self.yml_path, kind="urdf"
+            )
+        if kinematics.get("asset_root_path"):
+            kinematics["asset_root_path"] = _resolve_curobo_asset_path(
+                kinematics["asset_root_path"], self.yml_path, kind="asset_root"
+            )
         robot_cfg_v2 = {
             "robot_cfg": {"kinematics": kinematics},
             "load_dynamics": bool(yml_data.get("load_dynamics", False)),

@@ -5,7 +5,7 @@ common:
   camera_config: "camera_config"
   render_interval: 10
   robot_self_collision: true
-  eval_nums: 50
+  eval_nums: 15
 
 tasks:
   match_and_pick_from_conveyor:
@@ -28,11 +28,11 @@ tasks:
   
   hang_mugs:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
 
   hang_mugs_random:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
   
   imitate_sorting_sequence:
     robot_config: "dual_x5_and_franka_competition"
@@ -41,49 +41,49 @@ tasks:
     robot_config: "dual_x5_and_franka_competition"
   
   fold_clothes:
-    eval_nums: 25
+    eval_nums: 10
   
   fold_clothes_random:
-    eval_nums: 25
+    eval_nums: 10
   
   arrange_largest_number:
-    eval_nums: 25
+    eval_nums: 10
 
   arrange_largest_number_random:
-    eval_nums: 25
+    eval_nums: 10
   
   sort_nesting_dolls_by_size:
-    eval_nums: 25
+    eval_nums: 10
   
   sort_nesting_dolls_by_size_random:
-    eval_nums: 25
+    eval_nums: 10
   
   stack_blocks:
-    eval_nums: 25
+    eval_nums: 10
   
   stack_blocks_random:
-    eval_nums: 25
+    eval_nums: 10
   
   make_toast:
     data_source: "teleop"
     robot_self_collision: false
-    eval_nums: 25
+    eval_nums: 10
 
   make_toast_random:
     data_source: "teleop"
     robot_self_collision: false
-    eval_nums: 25
+    eval_nums: 10
 
   organize_table:
     data_source: "teleop"
   
   pack_objects_into_box:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
 
   pack_objects_into_box_random:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
   
   play_tic_tac_toe:
     robot_config: "dual_x5_and_franka_competition"
@@ -93,53 +93,53 @@ tasks:
   
   pour_liquid_into_cup:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
 
   pour_liquid_into_cup_random:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
   
   press_by_number:
     robot_self_collision: false
 
   push_T:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
 
   push_T_random:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
   
   stack_bowls:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
 
   stack_bowls_random:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
   
   store_laptop_and_headphones:
     data_source: "teleop"
     render_interval: 5
     robot_self_collision: false
-    eval_nums: 25
+    eval_nums: 10
 
   store_laptop_and_headphones_random:
     data_source: "teleop"
     render_interval: 5
     robot_self_collision: false
-    eval_nums: 25
+    eval_nums: 10
   
   swap_blocks:
     robot_self_collision: false
   
   sweep_blocks:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
 
   sweep_blocks_random:
     data_source: "teleop"
-    eval_nums: 25
+    eval_nums: 10
   
   pick_from_conveyor_by_image:
     scene_config: "conveyor"

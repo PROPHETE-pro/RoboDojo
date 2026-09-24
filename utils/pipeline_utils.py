@@ -6,6 +6,19 @@ from env.global_configs import *
 from utils.load_file import *
 
 
+def eval_result_root():
+    """Directory that holds per-task videos and `_result.json`.
+
+    Prefer absolute `ROBODOJO_EVAL_ROOT` (typically
+    `robodojo_runtime/eval_result/RoboDojo`) so writes never follow a
+    RoboDojo source/symlink tree onto another disk.
+    """
+    override = os.environ.get("ROBODOJO_EVAL_ROOT")
+    if override:
+        return override
+    return os.path.join("eval_result", BENCHMARK)
+
+
 def get_embodiment_config(robot_name, key=None):
     if key is not None:
         config_path = os.path.join(ROBOTS_PATH, f"{robot_name}/{key}_robot_config.yml")

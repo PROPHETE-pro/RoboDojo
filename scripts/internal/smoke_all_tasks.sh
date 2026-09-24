@@ -29,6 +29,7 @@ run_id="$(date +%Y-%m-%d_%H-%M-%S)_smoke"
 summary_path=""
 markdown_path=""
 log_dir=""
+user_log_dir=""
 only_tasks=""
 tasks_file=""
 dimensions=""
@@ -63,6 +64,7 @@ Options:
   --markdown PATH     Markdown summary path (default: smoke_results/<run_id>.md)
   --run-id ID         Stable run id used in result paths and summaries.
   --eval-num NUM      Episode count for each task (default: 1). Use `native` to use per-task counts from _task.yml.
+  --log-dir PATH      Directory for per-task full logs (default: smoke_results/<run_id>/logs).
   --dataset NAME      eval.sh dataset arg (default: RoboDojo)
   --ckpt NAME         Policy checkpoint name (required)
   --env-cfg NAME      env_cfg stem (default: arx_x5)
@@ -122,6 +124,7 @@ while [[ $# -gt 0 ]]; do
     --summary) need_value "$@"; summary_path="$2"; shift 2 ;;
     --markdown) need_value "$@"; markdown_path="$2"; shift 2 ;;
     --run-id) need_value "$@"; run_id="$2"; shift 2 ;;
+    --log-dir) need_value "$@"; user_log_dir="$2"; shift 2 ;;
     --eval-num) need_value "$@"; eval_num="$2"; shift 2 ;;
     --dataset) need_value "$@"; dataset="$2"; shift 2 ;;
     --ckpt) need_value "$@"; ckpt="$2"; shift 2 ;;
@@ -205,7 +208,7 @@ fi
 
 summary_path="${summary_path:-${ROOT_DIR}/smoke_results/${run_id}.json}"
 markdown_path="${markdown_path:-${ROOT_DIR}/smoke_results/${run_id}.md}"
-log_dir="${ROOT_DIR}/smoke_results/${run_id}/logs"
+log_dir="${user_log_dir:-${ROOT_DIR}/smoke_results/${run_id}/logs}"
 mkdir -p "$(dirname "${summary_path}")" "$(dirname "${markdown_path}")" "${log_dir}"
 
 RESULTS_TSV="$(mktemp)"
@@ -727,6 +730,7 @@ done
 echo "[smoke_all_tasks] tasks=${#TASKS[@]} active=${#ACTIVE_TASKS[@]} dimensions=${dimensions:-all} eval_num=${eval_num} run_id=${run_id}"
 echo "[smoke_all_tasks] summary=${summary_path}"
 echo "[smoke_all_tasks] markdown=${markdown_path}"
+echo "[smoke_all_tasks] log_dir=${log_dir}"
 
 extract_eval_time() {
   local result_path="$1"
@@ -748,14 +752,15 @@ run_eval_for_task() {
   local task_host="${5:-}"
   local task_port="${6:-}"
   local task_run_id="${run_id}_${task}"
-  local result_path="${ROOT_DIR}/eval_result/RoboDojo/${task}/${policy_name}/${env_cfg}/${seed}_ckpt_name=${ckpt},action_type=${action_type}/${task_run_id}/_result.json"
+  local result_root="${ROBODOJO_EVAL_ROOT:-${ROOT_DIR}/eval_result/RoboDojo}"
+  local result_path="${result_root}/${task}/${policy_name}/${env_cfg}/${seed}_ckpt_name=${ckpt},action_type=${action_type}/${task_run_id}/_result.json"
   local log_path="${log_dir}/${task}.log"
   local rc elapsed eval_time message start_sec end_sec
 
   if [[ "${execution_mode}" == "eval" ]]; then
-    echo "[smoke_all_tasks] RUN ${task} (policy_gpu=${task_policy_gpu}, env_gpu=${task_env_gpu})"
+    echo "[smoke_all_tasks] RUN ${task} (policy_gpu=${task_policy_gpu}, env_gpu=${task_env_gpu}) log=${log_path}"
   else
-    echo "[smoke_all_tasks] RUN ${task} (host=${task_host}, port=${task_port}, env_gpu=${task_env_gpu})"
+    echo "[smoke_all_tasks] RUN ${task} (host=${task_host}, port=${task_port}, env_gpu=${task_env_gpu}) log=${log_path}"
   fi
   start_sec="$(date +%s)"
   set +e
@@ -797,11 +802,15 @@ run_eval_for_task() {
   if [[ "${dry_run}" == "true" ]]; then
     eval_cmd+=(--dry-run)
   fi
+  # Full Isaac/policy output goes to the per-task log. Master stdout keeps progress lines.
+  local progress_re='\[MAIN\]|\[CONNECTED\]|\[CONNECTING\]|\[ERROR\]|\[SERVER\]|Model loaded|env0 step|Success nums|Fail nums|Unstable nums|eval finished|wall_clock|Traceback|Resetting all|Simulation App Startup Complete|Video is saved|FileNotFoundError'
   ROBODOJO_RUN_ID="${task_run_id}" \
   ROBODOJO_FATAL_RESTART_COUNT=0 \
-  "${eval_cmd[@]}" \
-    > "${log_path}" 2>&1
-  rc=$?
+  "${eval_cmd[@]}" 2>&1 \
+    | stdbuf -oL tee "${log_path}" \
+    | stdbuf -oL tr '\r' '\n' \
+    | stdbuf -oL grep -E --line-buffered "${progress_re}"
+  rc="${PIPESTATUS[0]}"
   set -e
   end_sec="$(date +%s)"
   elapsed=$((end_sec - start_sec))
@@ -874,6 +883,10 @@ run_parallel_group() {
   local task_host="${7:-}"
   local task_port="${8:-}"
   local task failed="0"
+  local cache_root="${XDG_CACHE_HOME:-${HOME}/.cache}/robodojo_gpu_worker_${worker_id}"
+  export XDG_CACHE_HOME="${cache_root}"
+  export WARP_CACHE_PATH="${cache_root}/warp"
+  mkdir -p "${WARP_CACHE_PATH}" "${cache_root}/ov" "${cache_root}/ov-data"
 
   while IFS= read -r task || [[ -n "${task}" ]]; do
     [[ -n "${task}" ]] || continue

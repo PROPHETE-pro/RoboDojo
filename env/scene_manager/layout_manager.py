@@ -89,6 +89,7 @@ class LayoutManager:
         self.instance_type_by_env = [{} for _ in range(self.num_envs)]
         self.saved_layouts = [None for _ in range(self.num_envs)]
         self.replay = True
+        self._seeds_per_env = list(seeds_per_env) if seeds_per_env is not None else None
 
     def process_config(self):
         keys = ["Rigid", "Dynamic", "Geometry", "Articulation", "Garment", "Fluid"]
@@ -107,6 +108,36 @@ class LayoutManager:
 
     def set_saved_layout(self, env_idx: int, layout):
         self.saved_layouts[env_idx] = layout
+
+    def generate_layout(self, env_idx: int, seed: int):
+        """Sample an in-memory Eval_Layout dict from task YAML (does not write Assets)."""
+        from env.scene_manager.layout_sampler import generate_layout as sample_layout
+
+        seed = int(seed)
+        seed_everywhere(seed)
+        task_cfg = self.task_config
+        scene_cfg = self.scene_config
+        if isinstance(task_cfg, DictConfig):
+            task_cfg = OmegaConf.to_container(task_cfg, resolve=True)
+        if isinstance(scene_cfg, DictConfig):
+            scene_cfg = OmegaConf.to_container(scene_cfg, resolve=True)
+        prev_replay = self.replay
+        self.replay = False
+        try:
+            layout = sample_layout(
+                task_config=task_cfg,
+                scene_config=scene_cfg,
+                env_spacing=self.env_spacing,
+                seed=seed,
+            )
+        finally:
+            self.replay = prev_replay
+        self.set_saved_layout(env_idx, layout)
+        print(
+            f"[LayoutManager] procedural layout generated env_idx={env_idx} seed={seed}",
+            flush=True,
+        )
+        return layout
 
     def clear_object_records(self, env_idx_list=None):
         if env_idx_list is None:
