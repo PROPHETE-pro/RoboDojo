@@ -26,6 +26,11 @@ class PlugInChargerCommon:
             ]
         )
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import plug_in_charger_groups
+
+        return plug_in_charger_groups(self)
+
     def gen_instruction(self, env_idx):
         templates = ["Plug the charger into the power strip."]
         return templates

@@ -22,6 +22,19 @@ from utils.transformer import calculate_target_pose
 
 _curobo_runtime.cuda_graph_reset = True
 
+
+def _cuda_capture_failed(exc: BaseException) -> bool:
+    """True when CUDA graph capture was invalidated, as opposed to a config error."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = f"{type(current).__name__} {current}".lower()
+        if "capture" in text or "cuda" in text:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
 # Docker/CI leftovers still present in intern-mounted curobo.yml files.
 _DOCKER_ROBODOJO_PREFIXES = (
     "/root/workspace/RoboDojo",
@@ -114,10 +127,18 @@ class CuroboPlanner:
         self.use_graph_planner = False
         self._batch_max_size = int(BATCH_NUM)
 
-        self.motion_planner = MotionPlanner(self._build_motion_planner_cfg(1))
-        self.motion_planner.warmup(enable_graph=self.use_graph_planner, num_warmup_iterations=5)
-        self.motion_planner_batch = BatchMotionPlanner(self._build_motion_planner_cfg(self._batch_max_size))
-        self.motion_planner_batch.warmup(enable_graph=self.use_graph_planner, num_warmup_iterations=5)
+        try:
+            self.motion_planner, self.motion_planner_batch = self._make_motion_planners()
+        except Exception as exc:
+            self._release_planners()
+            if not self.use_cuda_graph or not _cuda_capture_failed(exc):
+                raise
+            self.use_cuda_graph = False
+            print(
+                "[curobo] CUDA graph capture failed; rebuilding planners without graphs",
+                flush=True,
+            )
+            self.motion_planner, self.motion_planner_batch = self._make_motion_planners()
 
         planner_joint_names = list(self.motion_planner.joint_names)
         if planner_joint_names != self.cspace_joint_names:
@@ -154,6 +175,27 @@ class CuroboPlanner:
                 self.motion_planner_batch.destroy()
         except Exception:
             pass
+
+    def _make_motion_planners(self):
+        single = MotionPlanner(self._build_motion_planner_cfg(1))
+        single.warmup(enable_graph=self.use_graph_planner, num_warmup_iterations=5)
+        batch = BatchMotionPlanner(self._build_motion_planner_cfg(self._batch_max_size))
+        batch.warmup(enable_graph=self.use_graph_planner, num_warmup_iterations=5)
+        return single, batch
+
+    def _release_planners(self) -> None:
+        for name in ("ik_solver", "motion_planner", "motion_planner_batch"):
+            solver = getattr(self, name, None)
+            if solver is None:
+                continue
+            try:
+                solver.destroy()
+            except Exception:
+                pass
+            try:
+                delattr(self, name)
+            except Exception:
+                pass
 
     def _build_cspace_joint_values(self, active_joint_values):
         active_joint_values = self._extract_active_joint_values(active_joint_values)

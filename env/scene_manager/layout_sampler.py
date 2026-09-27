@@ -13,12 +13,27 @@ from copy import deepcopy
 from typing import Any
 
 import numpy as np
+import transforms3d as t3d
 from shapely.geometry import box
 from shapely.ops import unary_union
 
 from env.global_configs import OBJECTS_PATH
 from utils.cluttered_generator import ClutteredGenerator, UnStableError
 from utils.load_file import load_object_metadata, load_yaml
+from utils.transformer import rotate_quat_about_world_axis
+
+_VARIANT_KEYS = (
+    "place_tag",
+    "xlim",
+    "ylim",
+    "zlim",
+    "rotate_rand",
+    "rotate_deg",
+    "qpos",
+    "margin",
+    "check_mode",
+    "need_check_stable",
+)
 
 OBJECT_SPAWN_ORDER = ("Geometry", "Articulation", "Rigid", "Dynamic", "Garment", "Fluid")
 PHYSICS_TYPE = {
@@ -55,15 +70,21 @@ def generate_layout(
     layout: dict[str, Any] = {}
     placed: dict[str, dict[str, Any]] = {}
     used_parents: set[str] = set()
+    # Select asset indices in YAML order so same_index_as_label can see labels
+    # that are spawned later (Geometry bolts reference Rigid nuts).
+    assignments = _preselect_placements(task_config)
 
     for object_type in OBJECT_SPAWN_ORDER:
         groups = task_config.get(object_type) or []
         if not groups:
             continue
         type_bucket: dict[str, list[dict[str, Any]]] = {}
-        for group in groups:
+        for group_index, group in enumerate(groups):
+            attempts = assignments.get((object_type, group_index))
+            if not attempts:
+                continue
             for inst in _sample_group(
-                group=group,
+                attempts=attempts,
                 object_type=object_type,
                 generators=generators,
                 table_info=table_info,
@@ -310,19 +331,6 @@ def _object_dir(object_type: str, category: str, cluttered: bool) -> str:
     return os.path.join(OBJECTS_PATH, object_type, category)
 
 
-def _half_height(metadata: dict[str, Any] | None) -> float:
-    if not metadata:
-        return 0.0
-    physics = metadata.get("physics") or {}
-    size = physics.get("size")
-    if isinstance(size, (list, tuple)) and len(size) >= 3:
-        return abs(float(size[2])) / 2.0
-    geom = ((metadata.get("geometry") or {}).get("oriented_bbox") or {}).get("extents")
-    if isinstance(geom, (list, tuple)) and len(geom) >= 3:
-        return abs(float(geom[2])) / 2.0
-    return 0.0
-
-
 def _normalize_place_tag(place_tag: Any) -> list[str] | None:
     if place_tag is None:
         return None
@@ -360,24 +368,312 @@ def _pick_relative_plane(common: dict[str, Any], used_parents: set[str]) -> str:
     return str(relative or "Table")
 
 
-def _parent_surface_z(parent: dict[str, Any]) -> float:
-    pos = parent.get("default_pos") or [0.0, 0.0, 0.0]
-    return float(pos[2]) + _half_height({"physics": parent.get("physics") or {}})
+def _variant_overrides(category: dict[str, Any]) -> dict[str, Any]:
+    return {key: category[key] for key in _VARIANT_KEYS if key in category}
 
 
-def _translate_region(region, dx: float, dy: float):
-    if region is None:
+def _uses_category_variants(group: dict[str, Any], mode: str) -> bool:
+    if mode != "same":
+        return False
+    return any(
+        _variant_overrides(cat)
+        for cat in (group.get("category") or [])
+        if isinstance(cat, dict)
+    )
+
+
+def _indices_for_category(
+    category: dict[str, Any],
+    object_type: str,
+    cluttered: bool = False,
+) -> list[tuple[str, int]]:
+    name = category.get("name")
+    if not name:
+        return []
+    indices = category.get("index")
+    if not indices:
+        indices = _available_indices(object_type, str(name), cluttered=cluttered)
+    return [(str(name), int(idx)) for idx in indices]
+
+
+def _compose_pose(parent_pose: np.ndarray, local_pose: np.ndarray) -> np.ndarray:
+    """Map a pose in the parent frame into the parent pose's frame.
+
+    ``R_world = R_parent @ R_local``, matching ``LayoutManager.get_support_points``
+    (``ref_matrix @ pose_to_matrix``). Position uses the parent rotation only.
+    """
+    parent_pose = np.asarray(parent_pose, dtype=float).reshape(7)
+    local_pose = np.asarray(local_pose, dtype=float).reshape(7)
+    world = np.zeros(7, dtype=float)
+    world[:3] = parent_pose[:3] + t3d.quaternions.rotate_vector(local_pose[:3], parent_pose[3:])
+    world[3:] = t3d.quaternions.qmult(parent_pose[3:], local_pose[3:])
+    return world
+
+
+def _origin_from_contact(contact_world: np.ndarray, contact_local: np.ndarray) -> np.ndarray:
+    """Invert ``_compose_pose``: contact = origin ∘ contact_local."""
+    contact_world = np.asarray(contact_world, dtype=float).reshape(7)
+    contact_local = np.asarray(contact_local, dtype=float).reshape(7)
+    origin = np.zeros(7, dtype=float)
+    origin[3:] = t3d.quaternions.qmult(
+        contact_world[3:], t3d.quaternions.qinverse(contact_local[3:])
+    )
+    origin[:3] = contact_world[:3] - t3d.quaternions.rotate_vector(contact_local[:3], origin[3:])
+    return origin
+
+
+def _bbox_vertices(metadata: dict[str, Any] | None) -> np.ndarray | None:
+    vertices = ((metadata or {}).get("geometry") or {}).get("oriented_bbox", {}).get("vertices")
+    if not vertices:
         return None
-    return shapely_translate(region, dx, dy)
+    return np.asarray(vertices, dtype=float).reshape(-1, 3)
 
 
-def shapely_translate(geom, dx: float, dy: float):
-    try:
-        from shapely.affinity import translate
+def _world_min_z(pose: np.ndarray, vertices: np.ndarray) -> float:
+    rot = t3d.quaternions.quat2mat(np.asarray(pose[3:], dtype=float))
+    return float((vertices @ rot.T + np.asarray(pose[:3], dtype=float))[:, 2].min())
 
-        return translate(geom, xoff=dx, yoff=dy)
-    except Exception:
-        return geom
+
+def _lift_above_parent(
+    origin: np.ndarray,
+    child_metadata: dict[str, Any],
+    parent_pose: np.ndarray,
+    parent_metadata: dict[str, Any] | None,
+    clearance: float = 0.002,
+) -> np.ndarray:
+    """Raise a support-snapped child so its mesh does not start inside the table.
+
+    Support centers are often the grasp/slot anchor, which can sit inside the
+    child mesh. A vertical coin centered on that anchor clips the table and the
+    stability check rejects every seed.
+    """
+    child_vertices = _bbox_vertices(child_metadata)
+    parent_vertices = _bbox_vertices(parent_metadata)
+    if child_vertices is None or parent_vertices is None:
+        return origin
+    gap = _world_min_z(parent_pose, parent_vertices) + clearance - _world_min_z(origin, child_vertices)
+    if gap <= 0.0:
+        return origin
+    lifted = np.array(origin, dtype=float, copy=True)
+    lifted[2] += gap
+    return lifted
+
+
+def _record_pose(record: dict[str, Any]) -> np.ndarray:
+    pos = record.get("default_pos") or [0.0, 0.0, 0.0]
+    ori = record.get("default_ori") or [1.0, 0.0, 0.0, 0.0]
+    return np.asarray([*pos[:3], *ori[:4]], dtype=float)
+
+
+def _object_type_of(record: dict[str, Any]) -> str:
+    physics_type = str((record.get("physics") or {}).get("type") or "rigid")
+    for name, value in PHYSICS_TYPE.items():
+        if value == physics_type:
+            return name
+    return "Rigid"
+
+
+def _support_local_pose(parent: dict[str, Any] | None, support_key: str | None) -> np.ndarray | None:
+    """Return one ``passive.support`` center of ``parent``, or None if it is not a support."""
+    if parent is None or not support_key:
+        return None
+    metadata = load_object_metadata(
+        _object_dir(_object_type_of(parent), str(parent.get("category")), cluttered=False),
+        int(parent.get("category_idx", 0)),
+    )
+    if not metadata:
+        return None
+    item = ((metadata.get("passive") or {}).get("support") or {}).get(support_key)
+    if not isinstance(item, dict):
+        return None
+    centers = item.get("center") or []
+    if not centers:
+        return None
+    center = centers[int(np.random.randint(len(centers)))]
+    return np.asarray(center, dtype=float).reshape(7)
+
+
+def _local_xy(xlim: Any, ylim: Any) -> tuple[float, float]:
+    xs = _intervals(xlim) or [(0.0, 0.0)]
+    ys = _intervals(ylim) or [(0.0, 0.0)]
+    point_like = (
+        len(xs) == 1
+        and len(ys) == 1
+        and abs(xs[0][0] - xs[0][1]) <= 1e-12
+        and abs(ys[0][0] - ys[0][1]) <= 1e-12
+    )
+    if point_like:
+        return float(xs[0][0]), float(ys[0][0])
+    gen = ClutteredGenerator()
+    region = gen._normalize_region(_region_from_lims(xlim, ylim))
+    sampled = gen.sample_point_in_region(region)
+    if sampled is None:
+        return (float(xs[0][0]) + float(xs[0][1])) / 2.0, (float(ys[0][0]) + float(ys[0][1])) / 2.0
+    return float(sampled[0]), float(sampled[1])
+
+
+def _contact_frames(metadata: dict[str, Any], place_tag: Any) -> list[np.ndarray]:
+    places = ((metadata.get("active") or {}).get("place") or {})
+    allowed = None if place_tag is None else set(_normalize_place_tag(place_tag) or [])
+    frames: list[np.ndarray] = []
+    for key, data in places.items():
+        if allowed is not None and key not in allowed:
+            continue
+        center = ((data or {}).get("projection_circle") or {}).get("center")
+        if center is None:
+            continue
+        frames.append(np.asarray(center, dtype=float).reshape(7))
+    if not frames and allowed is not None:
+        return _contact_frames(metadata, None)
+    if not frames:
+        frames.append(np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=float))
+    return frames
+
+
+def _pose_on_support(
+    parent: dict[str, Any],
+    support_local: np.ndarray,
+    metadata: dict[str, Any],
+    common: dict[str, Any],
+) -> np.ndarray:
+    """Place the child contact on the parent support point.
+
+    World pose is parent ∘ support ∘ xlim/ylim offset. The child's own place tag
+    converts that contact pose into the object origin. The support key is not a
+    child place tag.
+    """
+    dx, dy = _local_xy(common.get("xlim"), common.get("ylim"))
+    offset = np.array([dx, dy, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=float)
+    parent_pose = _record_pose(parent)
+    contact_world = _compose_pose(parent_pose, _compose_pose(support_local, offset))
+    frames = _contact_frames(metadata, common.get("place_tag"))
+    contact_trans = frames[int(np.random.randint(len(frames)))]
+    gen = ClutteredGenerator()
+    origin = _origin_from_contact(contact_world, contact_trans)
+    if common.get("rotate_rand"):
+        angle = gen._sample_rotate_angle(common.get("rotate_deg"))
+        origin[3:] = rotate_quat_about_world_axis(
+            origin[3:], np.array([0.0, 0.0, 1.0]), angle_deg=angle
+        )
+    parent_metadata = load_object_metadata(
+        _object_dir(_object_type_of(parent), str(parent.get("category")), cluttered=False),
+        int(parent.get("category_idx", 0)),
+    )
+    return _lift_above_parent(origin, metadata, parent_pose, parent_metadata)
+
+
+def _footprint_blocked(table_gen: ClutteredGenerator, polygon, parent_label: str) -> bool:
+    candidate_ids = list(table_gen.rtree_idx.intersection(polygon.bounds))
+    for pid in candidate_ids:
+        other_name, other = table_gen.placed_polygons[pid]
+        if other_name == parent_label or str(other_name).startswith(f"{parent_label}_"):
+            continue
+        if polygon.intersects(other) and not polygon.touches(other):
+            return True
+    return False
+
+
+def _reserve_support_footprint(
+    table_gen: ClutteredGenerator,
+    pose: np.ndarray,
+    metadata: dict[str, Any],
+    common: dict[str, Any],
+    name: str,
+    parent_label: str,
+) -> bool:
+    """Record the child footprint on the table. ``point`` mode keeps the support pose."""
+    vertices = ((metadata.get("geometry") or {}).get("oriented_bbox") or {}).get("vertices")
+    if vertices is None:
+        return True
+    polygon, _z_max = table_gen._calc_polygon(
+        np.asarray(pose, dtype=float),
+        np.asarray(vertices, dtype=float),
+        float(common.get("margin", 0.01)),
+    )
+    check_mode = str(common.get("check_mode", "bbox"))
+    blocked = check_mode != "enforce" and _footprint_blocked(table_gen, polygon, parent_label)
+    if blocked and check_mode != "point":
+        return False
+    table_gen.add_polygon(polygon, name=name or "model", check_mode="enforce")
+    return True
+
+
+def _ordered_task_groups(task_config: dict[str, Any]) -> list[tuple[str, int, dict[str, Any]]]:
+    """Groups in YAML key order. The index matches ``task_config[object_type]``."""
+    ordered = []
+    for key, value in task_config.items():
+        if key not in OBJECT_SPAWN_ORDER or not isinstance(value, list):
+            continue
+        for group_index, group in enumerate(value):
+            if isinstance(group, dict):
+                ordered.append((key, group_index, group))
+    return ordered
+
+
+def _pack_choices(
+    picks: list[tuple[str, int]],
+    labels: list[Any],
+    common: dict[str, Any],
+) -> list[tuple[str, int, str, dict[str, Any]]]:
+    choices = []
+    for i, (category, category_idx) in enumerate(picks):
+        label = labels[i] if i < len(labels) else f"{category}{i}"
+        choices.append((str(category), int(category_idx), str(label), dict(common)))
+    return choices
+
+
+def _choose_group_placements(
+    group: dict[str, Any],
+    object_type: str,
+    selected: dict[str, tuple[str, int]],
+) -> list[list[tuple[str, int, str, dict[str, Any]]]]:
+    """Return placement attempts. Variant groups list every pose, shuffled."""
+    common = dict(group.get("common") or {})
+    select = group.get("select_mode") or {}
+    nums = _as_int(select.get("nums", 1), 1)
+    mode = str(select.get("mode", "allow_duplicate")).strip()
+    labels = list(select.get("label") or [])
+    if mode == "same_index_as_label":
+        same_label = select.get("same_label")
+        ref = selected.get(str(same_label))
+        if ref is None:
+            raise UnStableError(f"same_index_as_label missing label={same_label}")
+        pool = _category_pool(group, object_type, cluttered=False)
+        matches = [(name, idx) for name, idx in pool if int(idx) == int(ref[1])]
+        if not matches:
+            raise UnStableError(
+                f"same_index_as_label label={same_label} index={ref[1]} not in {object_type} pool"
+            )
+        return [_pack_choices([matches[0]] * nums, labels, common)]
+    if _uses_category_variants(group, mode):
+        variants = [
+            cat for cat in (group.get("category") or []) if isinstance(cat, dict) and cat.get("name")
+        ]
+        order = np.random.permutation(len(variants))
+        attempts = []
+        for variant_index in order:
+            variant = variants[int(variant_index)]
+            variant_common = dict(common)
+            variant_common.update(_variant_overrides(variant))
+            picks = _select_instances(_indices_for_category(variant, object_type), nums, "same")
+            attempts.append(_pack_choices(picks, labels, variant_common))
+        return attempts
+    picks = _select_instances(_category_pool(group, object_type, cluttered=False), nums, mode)
+    return [_pack_choices(picks, labels, common)]
+
+
+def _preselect_placements(
+    task_config: dict[str, Any],
+) -> dict[tuple[str, int], list[list[tuple[str, int, str, dict[str, Any]]]]]:
+    selected: dict[str, tuple[str, int]] = {}
+    assignments: dict[tuple[str, int], list[list[tuple[str, int, str, dict[str, Any]]]]] = {}
+    for object_type, group_index, group in _ordered_task_groups(task_config):
+        attempts = _choose_group_placements(group, object_type, selected)
+        assignments[(object_type, group_index)] = attempts
+        for category, category_idx, label, _common in attempts[0]:
+            if label:
+                selected[label] = (category, category_idx)
+    return assignments
 
 
 def _generator_for_plane(
@@ -399,20 +695,24 @@ def _generator_for_plane(
     parent_pos = parent.get("default_pos") or [0.0, 0.0, 0.0]
     parent_ori = parent.get("default_ori") or [1.0, 0.0, 0.0, 0.0]
     gen = ClutteredGenerator()
-    local_region = _region_from_lims(xlim, ylim)
-    world_region = _translate_region(local_region, float(parent_pos[0]), float(parent_pos[1]))
-    surface_z = _parent_surface_z(parent)
-    # Keep xy sampling in world; lift z onto the parent top surface.
+    # xlim/ylim are parent-local. The frame applies the full parent pose,
+    # so a rotated cup does not spin samples around the world origin.
     gen.reset(
-        generators["Table"].global_container,
+        box(-5.0, -5.0, 5.0, 5.0),
         frame=np.array(
-            [0.0, 0.0, surface_z, float(parent_ori[0]), float(parent_ori[1]), float(parent_ori[2]), float(parent_ori[3])],
+            [
+                float(parent_pos[0]),
+                float(parent_pos[1]),
+                float(parent_pos[2]),
+                float(parent_ori[0]),
+                float(parent_ori[1]),
+                float(parent_ori[2]),
+                float(parent_ori[3]),
+            ],
             dtype=float,
         ),
     )
-    for name, poly in generators["Table"].prohibited_area:
-        gen.add_prohibited_area(poly, name=name)
-    return gen, world_region, _normalize_place_tag(extra_tag)
+    return gen, _region_from_lims(xlim, ylim), _normalize_place_tag(extra_tag)
 
 
 def _build_instance_record(
@@ -492,6 +792,33 @@ def _place_one(
     if metadata is None:
         raise UnStableError(f"missing metadata for {object_type}/{category}/{category_idx:05d}")
     plane = relative_override or _pick_relative_plane(common, used_parents)
+    parent_label, support_key = _split_relative_plane(plane)
+    parent = None if parent_label in ("Table", "Ground") else placed.get(parent_label)
+    support_local = _support_local_pose(parent, support_key)
+    if parent is not None and support_local is not None:
+        pose = _pose_on_support(parent, support_local, metadata, common)
+        reserved = _reserve_support_footprint(
+            generators["Table"],
+            pose,
+            metadata,
+            common,
+            name=label or f"{category}_{category_idx}",
+            parent_label=parent_label,
+        )
+        if not reserved:
+            raise UnStableError(f"failed to place {category}/{category_idx} label={label}")
+        return _build_instance_record(
+            object_type=object_type,
+            category=category,
+            category_idx=category_idx,
+            label=label,
+            common=common,
+            pose=pose,
+            metadata=metadata,
+            cluttered=cluttered,
+            yaml_path=yaml_path,
+            relative_plane=plane,
+        )
     gen, allowed, extra_place = _generator_for_plane(
         plane,
         generators,
@@ -533,9 +860,9 @@ def _place_one(
     )
 
 
-def _sample_group(
+def _place_choices(
+    choices: list[tuple[str, int, str, dict[str, Any]]],
     *,
-    group: dict[str, Any],
     object_type: str,
     generators: dict[str, ClutteredGenerator],
     table_info: dict[str, Any],
@@ -543,18 +870,10 @@ def _sample_group(
     placed: dict[str, dict[str, Any]],
     used_parents: set[str],
     cluttered: bool,
-    yaml_path: str | None = None,
+    yaml_path: str | None,
 ) -> list[dict[str, Any]]:
-    common = dict(group.get("common") or {})
-    select = group.get("select_mode") or {}
-    nums = _as_int(select.get("nums", 1), 1)
-    mode = str(select.get("mode", "allow_duplicate"))
-    labels = list(select.get("label") or [])
-    pool = _category_pool(group, object_type, cluttered=cluttered)
-    picks = _select_instances(pool, nums, mode)
     instances = []
-    for i, (category, category_idx) in enumerate(picks):
-        label = labels[i] if i < len(labels) else f"{category}{i}"
+    for category, category_idx, label, common in choices:
         inst = _place_one(
             object_type=object_type,
             category=category,
@@ -571,6 +890,45 @@ def _sample_group(
         )
         instances.append(inst)
     return instances
+
+
+def _sample_group(
+    *,
+    attempts: list[list[tuple[str, int, str, dict[str, Any]]]],
+    object_type: str,
+    generators: dict[str, ClutteredGenerator],
+    table_info: dict[str, Any],
+    ground_info: dict[str, Any],
+    placed: dict[str, dict[str, Any]],
+    used_parents: set[str],
+    cluttered: bool,
+    yaml_path: str | None = None,
+) -> list[dict[str, Any]]:
+    last_error: UnStableError | None = None
+    for attempt_index, choices in enumerate(attempts):
+        # A multi-object attempt that fails midway has already reserved footprints.
+        # Only single-object variant groups (the mallet stand) are retried.
+        if attempt_index > 0 and len(choices) != 1:
+            break
+        try:
+            return _place_choices(
+                choices,
+                object_type=object_type,
+                generators=generators,
+                table_info=table_info,
+                ground_info=ground_info,
+                placed=placed,
+                used_parents=used_parents,
+                cluttered=cluttered,
+                yaml_path=yaml_path,
+            )
+        except UnStableError as exc:
+            last_error = exc
+            if len(choices) != 1:
+                raise
+    if last_error is None:
+        raise UnStableError("no placement attempt")
+    raise last_error
 
 
 def _resolve_clutter_yaml(yaml_path: str | None) -> str:

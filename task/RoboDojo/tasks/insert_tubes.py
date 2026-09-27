@@ -63,6 +63,11 @@ class InsertTubesCommon:
             score_mode="transition",
         )
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import insert_tubes_groups
+
+        return insert_tubes_groups()
+
     def gen_instruction(self, env_idx):
         templates = ["Insert the three tubes into the rack one by one."]
         return templates

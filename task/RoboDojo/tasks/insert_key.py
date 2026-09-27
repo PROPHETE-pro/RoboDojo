@@ -56,6 +56,11 @@ class InsertKeyCommon:
             score_mode="transition",
         )
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import insert_key_groups
+
+        return insert_key_groups(self)
+
     def gen_instruction(self, env_idx):
         templates = [
             "Pick up the key, hand it over to the other hand, insert it into the keyhole, then turn it."

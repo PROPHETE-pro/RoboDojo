@@ -47,6 +47,11 @@ class DepositCoinCommon:
             score_mode="transition",
         )
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import deposit_coin_groups
+
+        return deposit_coin_groups(self)
+
     def gen_instruction(self, env_idx):
         templates = ["Pick up the coin from the holder and insert it precisely into the coin bank."]
         return templates

@@ -31,6 +31,11 @@ class PourBallsIntoVaseCommon:
             ]
         )
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import pour_balls_groups
+
+        return pour_balls_groups(self)
+
     def gen_instruction(self, env_idx):
         templates = ["Pour all the balls from the cup into the vase."]
         return templates

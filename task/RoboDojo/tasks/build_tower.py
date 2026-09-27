@@ -130,6 +130,11 @@ class BuildTowerCommon:
         rm = self.reward_manager
         rm.score(self._score_stage_checks(), [10, 30, 100], score_mode="transition")
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import build_tower_groups
+
+        return build_tower_groups()
+
     def gen_instruction(self, env_idx):
         templates = ["Build a tower using the wooden blocks and wooden boards."]
         return templates

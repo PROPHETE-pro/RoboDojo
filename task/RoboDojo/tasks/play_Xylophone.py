@@ -152,6 +152,11 @@ class PlayXylophoneCommon:
             ]
         )
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import play_xylophone_groups
+
+        return play_xylophone_groups()
+
     def gen_instruction(self, env_idx):
         templates = ["Pick up the mallet and strike all xylophone keys from left to right."]
         return templates

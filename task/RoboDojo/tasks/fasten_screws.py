@@ -62,6 +62,11 @@ class FastenScrewsCommon:
             score_mode="transition",
         )
 
+    def dense_stage_spec(self):
+        from env.reward_manager.dense_progress import fasten_screws_groups
+
+        return fasten_screws_groups()
+
     def gen_instruction(self, env_idx):
         templates = ["Insert and tighten each screw into the nut of the same color."]
         return templates
