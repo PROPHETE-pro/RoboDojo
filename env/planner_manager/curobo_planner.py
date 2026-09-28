@@ -23,6 +23,24 @@ from utils.transformer import calculate_target_pose
 _curobo_runtime.cuda_graph_reset = True
 
 
+def _planner_device() -> torch.device:
+    """GPU index Isaac was pinned to, not the default cuda:0.
+
+    Isaac children drop CUDA_VISIBLE_DEVICES so Vulkan and CUDA see the same
+    A800s. ``DeviceCfg()`` would then allocate every planner on physical GPU 0.
+    ``ROBODOJO_ISAAC_DEVICE`` is the Ray rank's GPU, the same index passed as
+    ``--device_id``.
+    """
+    raw = os.environ.get("ROBODOJO_ISAAC_DEVICE", "").strip()
+    try:
+        index = int(raw)
+    except ValueError:
+        index = 0
+    if index < 0:
+        index = 0
+    return torch.device("cuda", index)
+
+
 def _cuda_capture_failed(exc: BaseException) -> bool:
     """True when CUDA graph capture was invalidated, as opposed to a config error."""
     seen: set[int] = set()
@@ -120,7 +138,11 @@ class CuroboPlanner:
                 )
             self._active_to_cspace_idx.append(self.cspace_joint_names.index(joint_name))
 
-        self.device_cfg = DeviceCfg()
+        planner_device = _planner_device()
+        if planner_device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.set_device(planner_device)
+        self.device_cfg = DeviceCfg(device=planner_device)
+        print(f"[curobo] planner device={planner_device}", flush=True)
 
         self.use_cuda_graph = True
 
